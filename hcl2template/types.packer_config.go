@@ -64,12 +64,31 @@ type PackerConfig struct {
 	parser *Parser
 	files  []*hcl.File
 
+	// inputReport records, for this parse request only, where every input
+	// variable value came from and whether each attempt succeeded, failed or
+	// is still pending. It is created per parse so failures cannot leak into
+	// subsequent requests.
+	inputReport *InputValueReport
+
 	// Fields passed as command line flags
 	except  []glob.Glob
 	only    []glob.Glob
 	force   bool
 	debug   bool
 	onError string
+}
+
+// InputValueReport returns the per-request provenance report of input variable
+// values: the source, generation and succeeded/failed state of every attempt
+// to set a variable, as well as the variables that are still pending.
+//
+// A non-nil empty report is returned for configurations that did not collect
+// input values, so callers never need to nil-check.
+func (cfg *PackerConfig) InputValueReport() *InputValueReport {
+	if cfg.inputReport == nil {
+		return newInputValueReport()
+	}
+	return cfg.inputReport
 }
 
 type ValidationOptions struct {

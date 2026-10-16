@@ -150,6 +150,7 @@ func (p *Parser) Parse(filename string, varFiles []string, argVars map[string]st
 		ValidationOptions:       p.ValidationOptions,
 		parser:                  p,
 		files:                   files,
+		inputReport:             newInputValueReport(),
 	}
 
 	for _, file := range files {

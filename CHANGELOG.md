@@ -1,5 +1,19 @@
 # 📦 Changelog
 
+## UNRELEASED
+
+### IMPROVEMENTS:
+
+* core/hcl2: input variable collection now keeps a per-parse provenance report
+  (`PackerConfig.InputValueReport`) recording the source (default/env/varfile/cmd),
+  generation, entry point and parse/convert stage of every value attempt.
+  Succeeded, failed and still-pending variables are queryable separately, a
+  rejected value no longer shadows the last usable one, and reports never leak
+  across parse requests.
+* core: merging `-var-file` values for legacy JSON templates no longer mutates
+  the caller-provided variables map, so re-issuing a build/validate request with
+  the same arguments cannot inherit previously merged values.
+
 ## 1.16.1 (September 18, 2026)
 
 ### FEATURES:

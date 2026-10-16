@@ -43,18 +43,20 @@ func (m *Meta) Core(tpl *template.Template, cla *MetaArgs) (*packer.Core, error)
 			return nil, err
 		}
 	}
-	// Now read fj values back into flagvars and set as config.Variables. Only
-	// add to flagVars if the key doesn't already exist, because flagVars comes
-	// from the command line and should not be overridden by variable files.
-	if cla.Vars == nil {
-		cla.Vars = map[string]string{}
-	}
+	// Build the variables map from var files first, then from command line
+	// variables, into a fresh map. Only add a var-file key when it is not
+	// already set, because command line variables take precedence over
+	// variable files. The caller's MetaArgs.Vars map is intentionally left
+	// untouched so that re-using it for a later Core/parse call cannot inherit
+	// values merged from var files.
+	variables := make(map[string]string, len(*fj)+len(cla.Vars))
 	for k, v := range *fj {
-		if _, exists := cla.Vars[k]; !exists {
-			cla.Vars[k] = v
-		}
+		variables[k] = v
 	}
-	config.Variables = cla.Vars
+	for k, v := range cla.Vars {
+		variables[k] = v
+	}
+	config.Variables = variables
 
 	core := packer.NewCore(&config)
 	return core, nil

@@ -600,6 +600,20 @@ func (cfg *PackerConfig) collectInputVariableValues(env []string, files []*hcl.F
 	var diags hcl.Diagnostics
 	variables := cfg.InputVariables
 
+	// Track the provenance of every value for this parse request only; the
+	// report is fresh per configuration so rejected attempts cannot leak into
+	// later parses.
+	report := cfg.inputReport
+	if report == nil {
+		report = newInputValueReport()
+		cfg.inputReport = report
+	}
+	report.seedDefaults(variables)
+	// Bind the declared variables up-front so that the succeeded/failed/pending
+	// partitions stay queryable even when collection bails out early on a
+	// diagnostic.
+	report.bind(variables)
+
 	for _, raw := range env {
 		if !strings.HasPrefix(raw, VarEnvPrefix) {
 			continue
@@ -614,6 +628,7 @@ func (cfg *PackerConfig) collectInputVariableValues(env []string, files []*hcl.F
 
 		name := raw[:eq]
 		value := raw[eq+1:]
+		entry := VarEnvPrefix + name
 
 		variable, found := variables[name]
 		if !found {
@@ -625,11 +640,18 @@ func (cfg *PackerConfig) collectInputVariableValues(env []string, files []*hcl.F
 		expr, moreDiags := expressionFromVariableDefinition(fakeFilename, value, variable.Type)
 		diags = append(diags, moreDiags...)
 		if moreDiags.HasErrors() {
+			report.recordFailed(name, InputSourceEnv, entry, InputStageParse, cty.DynamicVal, firstDiagError(moreDiags))
 			continue
 		}
 
 		val, valDiags := expr.Value(nil)
 		diags = append(diags, valDiags...)
+		failedStage := InputValueStage("")
+		var failedErr error
+		if valDiags.HasErrors() {
+			failedStage = InputStageParse
+			failedErr = firstDiagError(valDiags)
+		}
 		if variable.Type != cty.NilType {
 			var err error
 			val = variable.applyTypeDefaults(val)
@@ -642,6 +664,8 @@ func (cfg *PackerConfig) collectInputVariableValues(env []string, files []*hcl.F
 					Subject:  expr.Range().Ptr(),
 				})
 				val = cty.DynamicVal
+				failedStage = InputStageConvert
+				failedErr = err
 			}
 		}
 		variable.Values = append(variable.Values, VariableAssignment{
@@ -649,6 +673,11 @@ func (cfg *PackerConfig) collectInputVariableValues(env []string, files []*hcl.F
 			Value: val,
 			Expr:  expr,
 		})
+		if failedStage != "" {
+			report.recordFailed(name, InputSourceEnv, entry, failedStage, val, failedErr)
+		} else {
+			report.recordSucceeded(name, InputSourceEnv, entry, val)
+		}
 	}
 
 	// files will contain files found in the folder then files passed as
@@ -720,6 +749,12 @@ func (cfg *PackerConfig) collectInputVariableValues(env []string, files []*hcl.F
 
 			val, moreDiags := attr.Expr.Value(nil)
 			diags = append(diags, moreDiags...)
+			failedStage := InputValueStage("")
+			var failedErr error
+			if moreDiags.HasErrors() {
+				failedStage = InputStageParse
+				failedErr = firstDiagError(moreDiags)
+			}
 
 			if variable.Type != cty.NilType {
 				var err error
@@ -733,6 +768,8 @@ func (cfg *PackerConfig) collectInputVariableValues(env []string, files []*hcl.F
 						Subject:  attr.Expr.Range().Ptr(),
 					})
 					val = cty.DynamicVal
+					failedStage = InputStageConvert
+					failedErr = err
 				}
 			}
 
@@ -741,6 +778,11 @@ func (cfg *PackerConfig) collectInputVariableValues(env []string, files []*hcl.F
 				Value: val,
 				Expr:  attr.Expr,
 			})
+			if failedStage != "" {
+				report.recordFailed(name, InputSourceVarfile, attr.Expr.Range().Filename, failedStage, val, failedErr)
+			} else {
+				report.recordSucceeded(name, InputSourceVarfile, attr.Expr.Range().Filename, val)
+			}
 		}
 	}
 
@@ -760,15 +802,23 @@ func (cfg *PackerConfig) collectInputVariableValues(env []string, files []*hcl.F
 			continue
 		}
 
+		entry := fmt.Sprintf("-var %s", name)
 		fakeFilename := fmt.Sprintf("<value for var.%s from arguments>", name)
 		expr, moreDiags := expressionFromVariableDefinition(fakeFilename, value, variable.Type)
 		diags = append(diags, moreDiags...)
 		if moreDiags.HasErrors() {
+			report.recordFailed(name, InputSourceCmd, entry, InputStageParse, cty.DynamicVal, firstDiagError(moreDiags))
 			continue
 		}
 
 		val, valDiags := expr.Value(nil)
 		diags = append(diags, valDiags...)
+		failedStage := InputValueStage("")
+		var failedErr error
+		if valDiags.HasErrors() {
+			failedStage = InputStageParse
+			failedErr = firstDiagError(valDiags)
+		}
 
 		if variable.Type != cty.NilType {
 			var err error
@@ -781,6 +831,8 @@ func (cfg *PackerConfig) collectInputVariableValues(env []string, files []*hcl.F
 					Detail:   fmt.Sprintf("The received arg value for %s is not compatible with the variable's type constraint: %s.", name, err),
 				})
 				val = cty.DynamicVal
+				failedStage = InputStageConvert
+				failedErr = err
 			}
 		}
 
@@ -789,6 +841,11 @@ func (cfg *PackerConfig) collectInputVariableValues(env []string, files []*hcl.F
 			Value: val,
 			Expr:  expr,
 		})
+		if failedStage != "" {
+			report.recordFailed(name, InputSourceCmd, entry, failedStage, val, failedErr)
+		} else {
+			report.recordSucceeded(name, InputSourceCmd, entry, val)
+		}
 	}
 
 	return diags
