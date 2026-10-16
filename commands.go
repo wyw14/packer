@@ -71,6 +71,10 @@ func init() {
 			}, nil
 		},
 
+		"recovery-drill": func() (cli.Command, error) {
+			return &command.RecoveryDrillCommand{Meta: *CommandMeta}, nil
+		},
+
 		"plugins installed": func() (cli.Command, error) {
 			return &command.PluginsInstalledCommand{
 				Meta: *CommandMeta,

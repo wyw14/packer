@@ -1,5 +1,18 @@
 # 📦 Changelog
 
+## UNRELEASED
+
+### FEATURES:
+
+* command: add `packer recovery-drill`, an isolated recovery drill tool that
+  runs a deterministic simulated build pipeline, injects controlled partial
+  failures and hard interruptions, records checkpoints in an isolated state
+  directory, and verifies recovery invariants after resume. The drill is
+  read-only with respect to real templates, plugins, and cloud resources
+  (all writes stay inside `--state-dir`, and `-read-only` writes nothing),
+  is safe to rerun (completed drills are no-ops), and exits 0/1/2/3 for
+  completed/planned-fault/usage/invariant-failure outcomes.
+
 ## 1.16.1 (September 18, 2026)
 
 ### FEATURES:
