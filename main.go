@@ -343,6 +343,9 @@ func loadConfig() (*config, error) {
 		Provisioners:    packer.MapOfProvisioner{},
 		PostProcessors:  packer.MapOfPostProcessor{},
 		DataSources:     packer.MapOfDatasource{},
+		// Per-caller protocol rollout, published once for this Packer run
+		// from PACKER_FORCE_GOB / PACKER_FORCE_GOB_PLUGINS.
+		Protocols: packer.NewProtocolRolloutFromEnv(),
 	}
 
 	// Finally, try to use an internal plugin. Note that this will not override

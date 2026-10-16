@@ -77,8 +77,12 @@ func (c *ValidateCommand) RunContext(ctx context.Context, cla *ValidateArgs) int
 		return ret
 	}
 
-	if packer.PackerUseProto {
+	// The protocol rollout selects the wire protocol per plugin caller;
+	// this only reports the default feature version for the run.
+	if c.CoreConfig.Components.PluginConfig.UseProtobufFor(packer.InternalCaller) {
 		log.Printf("[TRACE] Using protobuf for communication with plugins")
+	} else {
+		log.Printf("[TRACE] Using gob for communication with plugins")
 	}
 
 	diags = packerStarter.Initialize(packer.InitializeOptions{

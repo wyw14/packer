@@ -3,10 +3,26 @@
 
 package plugin_tests
 
-import "github.com/hashicorp/packer/packer_test/common/check"
+import (
+	"fmt"
+	"regexp"
+
+	"github.com/hashicorp/packer/packer_test/common/check"
+)
 
 const pbPluginName = "github.com/hashicorp/pbtester"
 
+const (
+	testerPluginBinary = "packer-plugin-tester"
+	pbTesterBinary     = "packer-plugin-pbtester"
+)
+
+const (
+	pbWireProtocolMarker  = "using the protobuf wire protocol"
+	gobWireProtocolMarker = "using the gob wire protocol"
+)
+
+// CheckPBUsed checks the default feature-version summary logged for a run.
 func CheckPBUsed(expect bool) check.Checker {
 	const strToLookFor = "protobuf for communication with plugins"
 
@@ -18,8 +34,38 @@ func CheckPBUsed(expect bool) check.Checker {
 	return check.Grep(strToLookFor, opts...)
 }
 
-// Two different plugins installed locally, one with gob, one with protobuf.
-// Both should have different sources so Packer will discover and fallback to using only gob.
+// CheckPluginWireProtocol checks that the subprocess of the given installed
+// plugin binary was started with the expected wire protocol.
+func CheckPluginWireProtocol(binaryName string, expectProtobuf bool) check.Checker {
+	marker := gobWireProtocolMarker
+	if expectProtobuf {
+		marker = pbWireProtocolMarker
+	}
+	return check.Grep(fmt.Sprintf("%s.*%s", regexp.QuoteMeta(binaryName), marker))
+}
+
+// CheckPluginNotStarted checks that no subprocess of the given plugin binary
+// was started during the run.
+func CheckPluginNotStarted(binaryName string) check.Checker {
+	return check.GrepInverted(fmt.Sprintf(
+		"%s.*using the (%s|%s)",
+		regexp.QuoteMeta(binaryName), "protobuf", "gob"))
+}
+
+// CheckInternalWireProtocol checks the wire protocol used for Packer's own
+// internal components, which are executed by the test packer binary
+// (packer_core-<rand>[.exe]).
+func CheckInternalWireProtocol(expectProtobuf bool) check.Checker {
+	marker := gobWireProtocolMarker
+	if expectProtobuf {
+		marker = pbWireProtocolMarker
+	}
+	return check.Grep(fmt.Sprintf(`packer_core-[0-9]+(\.exe)?": %s`, marker))
+}
+
+// Two different plugins installed locally, one with gob only, one with
+// protobuf support. The protocol rollout selects the feature version per
+// caller, so both plugins coexist in the same build using their own protocol.
 func (ts *PackerGobTestSuite) TestTwoPluginsDifferentPB() {
 	pluginDir := ts.MakePluginDir().InstallPluginVersions("1.0.0+gob")
 	defer pluginDir.Cleanup()
@@ -28,13 +74,25 @@ func (ts *PackerGobTestSuite) TestTwoPluginsDifferentPB() {
 		SetArgs("plugins", "install", "--path", ts.GetPluginPath(ts.T(), "1.0.0+pb"), pbPluginName).
 		Assert(check.MustSucceed())
 
+	// Mixed build: old tester plugin gets the stable gob fallback while the
+	// protobuf-capable pbtester plugin uses protobuf.
 	ts.PackerCommand().UsePluginDir(pluginDir).
 		SetArgs("build", "./templates/test_both_plugins.pkr.hcl").
-		Assert(CheckPBUsed(false))
+		Assert(
+			check.MustSucceed(),
+			CheckPluginWireProtocol(testerPluginBinary, false),
+			CheckPluginWireProtocol(pbTesterBinary, true),
+		)
 
+	// Build using only one of the two plugins: only that caller's subprocess
+	// is started, still on its own protocol.
 	ts.PackerCommand().UsePluginDir(pluginDir).
 		SetArgs("build", "./templates/test_one_plugin.pkr.hcl").
-		Assert(CheckPBUsed(false))
+		Assert(
+			check.MustSucceed(),
+			CheckPluginWireProtocol(testerPluginBinary, false),
+			CheckPluginNotStarted(pbTesterBinary),
+		)
 }
 
 // Two plugins, both with protobuf supported
@@ -49,11 +107,19 @@ func (ts *PackerGobTestSuite) TestTwoPluginsBothPB() {
 
 	ts.PackerCommand().UsePluginDir(pluginDir).
 		SetArgs("build", "./templates/test_both_plugins.pkr.hcl").
-		Assert(CheckPBUsed(true))
+		Assert(
+			check.MustSucceed(),
+			CheckPluginWireProtocol(testerPluginBinary, true),
+			CheckPluginWireProtocol(pbTesterBinary, true),
+		)
 
 	ts.PackerCommand().UsePluginDir(pluginDir).
 		SetArgs("build", "./templates/test_one_plugin.pkr.hcl").
-		Assert(CheckPBUsed(true))
+		Assert(
+			check.MustSucceed(),
+			CheckPluginWireProtocol(testerPluginBinary, true),
+			CheckPluginNotStarted(pbTesterBinary),
+		)
 }
 
 // Two plugins, both with protobuf supported, force gob
@@ -70,12 +136,41 @@ func (ts *PackerGobTestSuite) TestTwoPluginsBothPBForceGob() {
 	ts.PackerCommand().UsePluginDir(pluginDir).
 		AddEnv("PACKER_FORCE_GOB", "1").
 		SetArgs("build", "./templates/test_both_plugins.pkr.hcl").
-		Assert(check.MustSucceed(), CheckPBUsed(false))
+		Assert(
+			check.MustSucceed(),
+			CheckPBUsed(false),
+			CheckPluginWireProtocol(testerPluginBinary, false),
+			CheckPluginWireProtocol(pbTesterBinary, false),
+		)
 
 	ts.PackerCommand().UsePluginDir(pluginDir).
 		AddEnv("PACKER_FORCE_GOB", "1").
 		SetArgs("build", "./templates/test_one_plugin.pkr.hcl").
-		Assert(check.MustSucceed(), CheckPBUsed(false))
+		Assert(
+			check.MustSucceed(),
+			CheckPluginWireProtocol(testerPluginBinary, false),
+		)
+}
+
+// Per-caller rollout: both plugins support protobuf, but PACKER_FORCE_GOB_PLUGINS
+// forces only pbtester back onto gob. The other caller must keep protobuf.
+func (ts *PackerGobTestSuite) TestPerCallerForceGobPlugins() {
+	pluginDir := ts.MakePluginDir().InstallPluginVersions("1.0.0+pb")
+	defer pluginDir.Cleanup()
+
+	ts.PackerCommand().UsePluginDir(pluginDir).
+		SetArgs("plugins", "install", "--path", ts.GetPluginPath(ts.T(), "1.0.0+pb"), pbPluginName).
+		Assert(check.MustSucceed())
+
+	ts.PackerCommand().UsePluginDir(pluginDir).
+		AddEnv("PACKER_FORCE_GOB_PLUGINS", "pbtester").
+		SetArgs("build", "./templates/test_both_plugins.pkr.hcl").
+		Assert(
+			check.MustSucceed(),
+			CheckPBUsed(true),
+			CheckPluginWireProtocol(testerPluginBinary, true),
+			CheckPluginWireProtocol(pbTesterBinary, false),
+		)
 }
 
 // Two plugins installed, one with two versions: one version supporting pb,
@@ -94,7 +189,10 @@ func (ts *PackerGobTestSuite) TestTwoPluginsLatestPBOlderGob_OlderPinned() {
 
 	ts.PackerCommand().UsePluginDir(pluginDir).
 		SetArgs("build", "./templates/test_one_pinned_plugin.pkr.hcl").
-		Assert(check.MustSucceed(), CheckPBUsed(false))
+		Assert(
+			check.MustSucceed(),
+			CheckPluginWireProtocol(testerPluginBinary, false),
+		)
 }
 
 // One plugin installed, one version supporting pb, one older with gob only
@@ -107,7 +205,10 @@ func (ts *PackerGobTestSuite) TestOnePluginLatestPBOlderGob_OlderPinned() {
 
 	ts.PackerCommand().UsePluginDir(pluginDir).
 		SetArgs("build", "./templates/test_one_pinned_plugin.pkr.hcl").
-		Assert(check.MustSucceed(), CheckPBUsed(false))
+		Assert(
+			check.MustSucceed(),
+			CheckPluginWireProtocol(testerPluginBinary, false),
+		)
 }
 
 // One plugin, with latest version supporting gob, but the older supporting protobuf
@@ -119,7 +220,10 @@ func (ts *PackerGobTestSuite) TestOnePluginWithLatestOnlyGob() {
 
 	ts.PackerCommand().UsePluginDir(pluginDir).
 		SetArgs("build", "./templates/test_one_plugin.pkr.hcl").
-		Assert(check.MustSucceed(), CheckPBUsed(false))
+		Assert(
+			check.MustSucceed(),
+			CheckPluginWireProtocol(testerPluginBinary, false),
+		)
 }
 
 // One plugin, gob only supported
@@ -130,7 +234,10 @@ func (ts PackerGobTestSuite) TestOnePluginWithOnlyGob() {
 
 	ts.PackerCommand().UsePluginDir(pluginDir).
 		SetArgs("build", "./templates/test_one_plugin.pkr.hcl").
-		Assert(check.MustSucceed(), CheckPBUsed(false))
+		Assert(
+			check.MustSucceed(),
+			CheckPluginWireProtocol(testerPluginBinary, false),
+		)
 }
 
 // One plugin, protobuf supported
@@ -141,7 +248,10 @@ func (ts PackerGobTestSuite) TestOnePluginWithPB() {
 
 	ts.PackerCommand().UsePluginDir(pluginDir).
 		SetArgs("build", "./templates/test_one_plugin.pkr.hcl").
-		Assert(check.MustSucceed(), CheckPBUsed(true))
+		Assert(
+			check.MustSucceed(),
+			CheckPluginWireProtocol(testerPluginBinary, true),
+		)
 }
 
 // No plugin installed, only internal components
@@ -152,31 +262,81 @@ func (ts PackerGobTestSuite) TestInternalOnly() {
 
 	ts.PackerCommand().UsePluginDir(pluginDir).
 		SetArgs("build", "./templates/internal_only.pkr.hcl").
-		Assert(check.MustSucceed(), CheckPBUsed(true))
+		Assert(
+			check.MustSucceed(),
+			CheckPBUsed(true),
+			CheckInternalWireProtocol(true),
+		)
 }
 
 // One plugin with gob only installed, use only internal components
 //
-// Packer in this case will fallback to Gob, even if the template uses internal
-// components only, as this is determined at loading time.
+// With per-caller protocol selection, an installed-but-unused plugin no
+// longer downgrades the internal components: internal components keep using
+// protobuf, and the gob-only plugin is only degraded for its own callers.
 func (ts PackerGobTestSuite) TestInternalOnlyWithGobPluginInstalled() {
 	pluginDir := ts.MakePluginDir().InstallPluginVersions("1.0.0+gob")
 	defer pluginDir.Cleanup()
 
 	ts.PackerCommand().UsePluginDir(pluginDir).
 		SetArgs("build", "./templates/internal_only.pkr.hcl").
-		Assert(check.MustSucceed(), CheckPBUsed(false))
+		Assert(
+			check.MustSucceed(),
+			CheckPBUsed(true),
+			CheckInternalWireProtocol(true),
+			CheckPluginNotStarted(testerPluginBinary),
+		)
 }
 
 // One plugin with pb support installed, use only internal components
 //
-// Packer in this case will fallback to Gob, even if the template uses internal
-// components only, as this is determined at loading time.
+// Internal components use protobuf, which is also the default feature version
+// for the installed plugin.
 func (ts PackerGobTestSuite) TestInternalOnlyWithPBPluginInstalled() {
 	pluginDir := ts.MakePluginDir().InstallPluginVersions("1.0.0+pb")
 	defer pluginDir.Cleanup()
 
 	ts.PackerCommand().UsePluginDir(pluginDir).
 		SetArgs("build", "./templates/internal_only.pkr.hcl").
-		Assert(check.MustSucceed(), CheckPBUsed(true))
+		Assert(
+			check.MustSucceed(),
+			CheckPBUsed(true),
+			CheckInternalWireProtocol(true),
+			CheckPluginNotStarted(testerPluginBinary),
+		)
+}
+
+// Restart & rollback across independent packer processes: a config change
+// (PACKER_FORCE_GOB) is adopted by newly started callers, and removing the
+// configuration rolls the feature version back to protobuf.
+func (ts *PackerGobTestSuite) TestProtocolRestartAndRollback() {
+	pluginDir := ts.MakePluginDir().InstallPluginVersions("1.0.0+pb")
+	defer pluginDir.Cleanup()
+
+	// First run: default configuration, protobuf.
+	ts.PackerCommand().UsePluginDir(pluginDir).
+		SetArgs("build", "./templates/test_one_plugin.pkr.hcl").
+		Assert(
+			check.MustSucceed(),
+			CheckPluginWireProtocol(testerPluginBinary, true),
+		)
+
+	// Configuration change applied before a restart: global gob fallback.
+	ts.PackerCommand().UsePluginDir(pluginDir).
+		AddEnv("PACKER_FORCE_GOB", "1").
+		SetArgs("build", "./templates/test_one_plugin.pkr.hcl").
+		Assert(
+			check.MustSucceed(),
+			CheckPBUsed(false),
+			CheckPluginWireProtocol(testerPluginBinary, false),
+		)
+
+	// Configuration rolled back (environment variable removed): new callers
+	// use protobuf again.
+	ts.PackerCommand().UsePluginDir(pluginDir).
+		SetArgs("build", "./templates/test_one_plugin.pkr.hcl").
+		Assert(
+			check.MustSucceed(),
+			CheckPluginWireProtocol(testerPluginBinary, true),
+		)
 }

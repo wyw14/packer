@@ -53,7 +53,31 @@ func TestHelperProcess(*testing.T) {
 		os.Exit(2)
 	}
 
-	cmd, _ := args[0], args[1:]
+	cmd, cmdArgs := args[0], args[1:]
+
+	// useProto reports whether the emulated plugin subprocess was asked to
+	// serve protobuf. It is set by the "start" form below and by a direct
+	// --protobuf flag on component commands.
+	useProto := false
+	if cmd == "start" {
+		// Emulate the SDK Set "start <kind> [--protobuf] <name>" command so
+		// component factories can be tested with their full command line.
+		filtered := make([]string, 0, 2)
+		for _, a := range cmdArgs {
+			if a == "--protobuf" {
+				useProto = true
+				continue
+			}
+			filtered = append(filtered, a)
+		}
+		if len(filtered) != 2 {
+			fmt.Fprintf(os.Stderr, "start expects <kind> <name>, got %v\n", cmdArgs)
+			os.Exit(2)
+		}
+		cmd, cmdArgs = filtered[0], filtered[1:]
+	}
+	args = cmdArgs
+
 	switch cmd {
 	case "bad-version":
 		fmt.Printf("%s1|%s|tcp|:1234\n", pluginsdk.APIVersionMajor, pluginsdk.APIVersionMinor)
@@ -63,6 +87,16 @@ func TestHelperProcess(*testing.T) {
 		if err != nil {
 			log.Printf("[ERR] %s", err)
 			os.Exit(1)
+		}
+		// Honour --protobuf the same way the SDK Set does, so tests can
+		// exercise both wire protocols against the helper plugin.
+		if useProto {
+			server.UseProto = true
+		}
+		for _, a := range args {
+			if a == "--protobuf" {
+				server.UseProto = true
+			}
 		}
 		err = server.RegisterBuilder(new(packersdk.MockBuilder))
 		if err != nil {

@@ -1,5 +1,18 @@
 # 📦 Changelog
 
+## 1.16.2 (Unreleased)
+
+### IMPROVEMENTS:
+
+* core/plugin: the plugin wire protocol (gob vs. protobuf) is now selected per
+  plugin caller instead of process-wide. A gob-only plugin is served with the
+  stable gob fallback on its own and no longer downgrades protobuf-capable
+  plugins or internal components. Per-caller decisions are frozen when each
+  plugin client starts, so protocol configuration changes and rollbacks only
+  affect newly started callers and never in-flight requests. `PACKER_FORCE_GOB`
+  remains the global fallback switch; the new `PACKER_FORCE_GOB_PLUGINS`
+  variable pins a comma-separated list of plugin names to gob.
+
 ## 1.16.1 (September 18, 2026)
 
 ### FEATURES:

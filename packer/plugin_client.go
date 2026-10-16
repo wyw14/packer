@@ -68,6 +68,16 @@ type PluginClientConfig struct {
 	// If non-nil, then the stderr of the client will be written to here
 	// (as well as the log).
 	Stderr io.Writer
+
+	// UseProto is the wire protocol feature version frozen for this client
+	// before its plugin subprocess is started. When true, protobuf is used to
+	// communicate with the plugin; when false, gob is used.
+	//
+	// The decision is resolved per caller from the protocol rollout at client
+	// creation time. Later rollout changes (including rollbacks) only affect
+	// newly created clients; a started plugin subprocess keeps communicating
+	// with the protocol it was started on for its whole lifetime.
+	UseProto bool
 }
 
 // This makes sure all the managed subprocesses are killed and properly
@@ -129,6 +139,22 @@ func (c *PluginClient) Exited() bool {
 	c.l.Lock()
 	defer c.l.Unlock()
 	return c.exited
+}
+
+// FreezeProtocol records the wire protocol this client must communicate with.
+// It can only take effect before Start is first called; freezing the protocol
+// on a started client is a no-op for the running subprocess. Prefer
+// PluginConfig.StartPluginClient, which resolves the decision from the
+// rollout and freezes it while building the plugin command line.
+func (c *PluginClient) FreezeProtocol(useProto bool) {
+	c.l.Lock()
+	defer c.l.Unlock()
+	if c.address != nil {
+		// The subprocess is already started and keeps its frozen protocol;
+		// a rollout change must not affect an in-flight client.
+		return
+	}
+	c.config.UseProto = useProto
 }
 
 // Returns a builder implementation that is communicating over this
@@ -237,6 +263,17 @@ func (c *PluginClient) Start() (net.Addr, error) {
 	cmd.Stdout = stdout_w
 
 	log.Printf("Starting plugin: %s %#v", cmd.Path, cmd.Args)
+
+	// The wire protocol is frozen for this client before the plugin
+	// subprocess starts, so this line describes every RPC connection made
+	// through it. It is also the marker tests and operators rely on to check
+	// which feature version a caller got, including per-caller gob fallbacks.
+	wireProtocol := WireProtocolGob
+	if c.config.UseProto {
+		wireProtocol = WireProtocolProtobuf
+	}
+	log.Printf("[TRACE] plugin process %q: using the %s wire protocol", cmd.Path, wireProtocol)
+
 	err := cmd.Start()
 	if err != nil {
 		return nil, err
@@ -417,7 +454,10 @@ func (c *PluginClient) Client() (*packerrpc.Client, error) {
 		conn.Close()
 		return nil, err
 	}
-	client.UseProto = PackerUseProto
+	// Use the protocol frozen for this client instead of a process-global
+	// setting, so per-caller rollout decisions and in-flight config changes
+	// stay consistent with the plugin subprocess we started.
+	client.UseProto = c.config.UseProto
 
 	return client, nil
 }

@@ -77,7 +77,11 @@ func (c *config) StartBuilder(name string) (packersdk.Builder, error) {
 // to load packersdk.Hook implementations from the defined plugins.
 func (c *config) StarHook(name string) (packersdk.Hook, error) {
 	log.Printf("Loading hook: %s\n", name)
-	return c.Plugins.Client(name).Hook()
+	// Legacy external hooks keep their historical argument-less invocation;
+	// freeze the selected protocol on the client for consistency.
+	client := c.Plugins.Client(name)
+	client.FreezeProtocol(c.Plugins.UseProtobufFor(name))
+	return client.Hook()
 }
 
 // This is a proper packersdk.PostProcessorFunc that can be used to load
@@ -106,15 +110,8 @@ func (c *config) discoverInternalComponents() error {
 		builder := builder
 		if !c.Plugins.Builders.Has(builder) {
 			c.Plugins.Builders.Set(builder, func() (packersdk.Builder, error) {
-				args := []string{"execute"}
-
-				if packer.PackerUseProto {
-					args = append(args, "--protobuf")
-				}
-
-				args = append(args, fmt.Sprintf("packer-builder-%s", builder))
-
-				return c.Plugins.Client(packerPath, args...).Builder()
+				return c.Plugins.StartPluginClient(packer.InternalCaller, packerPath,
+					[]string{"execute"}, []string{fmt.Sprintf("packer-builder-%s", builder)}).Builder()
 			})
 		}
 	}
@@ -123,15 +120,8 @@ func (c *config) discoverInternalComponents() error {
 		provisioner := provisioner
 		if !c.Plugins.Provisioners.Has(provisioner) {
 			c.Plugins.Provisioners.Set(provisioner, func() (packersdk.Provisioner, error) {
-				args := []string{"execute"}
-
-				if packer.PackerUseProto {
-					args = append(args, "--protobuf")
-				}
-
-				args = append(args, fmt.Sprintf("packer-provisioner-%s", provisioner))
-
-				return c.Plugins.Client(packerPath, args...).Provisioner()
+				return c.Plugins.StartPluginClient(packer.InternalCaller, packerPath,
+					[]string{"execute"}, []string{fmt.Sprintf("packer-provisioner-%s", provisioner)}).Provisioner()
 			})
 		}
 	}
@@ -140,15 +130,8 @@ func (c *config) discoverInternalComponents() error {
 		postProcessor := postProcessor
 		if !c.Plugins.PostProcessors.Has(postProcessor) {
 			c.Plugins.PostProcessors.Set(postProcessor, func() (packersdk.PostProcessor, error) {
-				args := []string{"execute"}
-
-				if packer.PackerUseProto {
-					args = append(args, "--protobuf")
-				}
-
-				args = append(args, fmt.Sprintf("packer-post-processor-%s", postProcessor))
-
-				return c.Plugins.Client(packerPath, args...).PostProcessor()
+				return c.Plugins.StartPluginClient(packer.InternalCaller, packerPath,
+					[]string{"execute"}, []string{fmt.Sprintf("packer-post-processor-%s", postProcessor)}).PostProcessor()
 			})
 		}
 	}
@@ -157,15 +140,8 @@ func (c *config) discoverInternalComponents() error {
 		dataSource := dataSource
 		if !c.Plugins.DataSources.Has(dataSource) {
 			c.Plugins.DataSources.Set(dataSource, func() (packersdk.Datasource, error) {
-				args := []string{"execute"}
-
-				if packer.PackerUseProto {
-					args = append(args, "--protobuf")
-				}
-
-				args = append(args, fmt.Sprintf("packer-datasource-%s", dataSource))
-
-				return c.Plugins.Client(packerPath, args...).Datasource()
+				return c.Plugins.StartPluginClient(packer.InternalCaller, packerPath,
+					[]string{"execute"}, []string{fmt.Sprintf("packer-datasource-%s", dataSource)}).Datasource()
 			})
 		}
 	}

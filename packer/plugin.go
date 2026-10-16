@@ -33,6 +33,30 @@ type PluginConfig struct {
 	// UseProtobuf is set if all the plugin candidates support protobuf, and
 	// the user has not forced usage of gob for serialisation.
 	UseProtobuf bool
+
+	// Protocols selects the wire protocol feature version to use per caller
+	// (plugin). It is normally initialised from the environment when Packer
+	// starts; when nil it is lazily initialised on first use. Per-caller
+	// decisions are frozen on each plugin client, so rollout changes and
+	// rollbacks never affect already started plugin subprocesses.
+	Protocols *ProtocolRollout
+}
+
+// protocolRollout returns the configured rollout, lazily initialising a
+// default one (from the environment) for PluginConfig values created without
+// one, such as in tests.
+func (c *PluginConfig) protocolRollout() *ProtocolRollout {
+	if c.Protocols == nil {
+		c.Protocols = NewProtocolRolloutFromEnv()
+	}
+	return c.Protocols
+}
+
+// UseProtobufFor reports the wire protocol feature version currently selected
+// for caller. The returned value is what a plugin client created now would
+// freeze.
+func (c *PluginConfig) UseProtobufFor(caller string) bool {
+	return c.protocolRollout().UseProtobuf(caller)
 }
 
 // PACKERSPACE is used to represent the spaces that separate args for a command
@@ -67,6 +91,10 @@ func (c *PluginConfig) Discover() error {
 	if os.Getenv(pluginsdk.MagicCookieKey) == pluginsdk.MagicCookieValue {
 		return nil
 	}
+
+	// Initialise the per-caller protocol rollout before any plugin gets
+	// registered, so component factories can resolve their feature version.
+	c.protocolRollout()
 
 	if c.PluginDirectory == "" {
 		c.PluginDirectory, _ = PluginFolder()
@@ -123,7 +151,42 @@ func (c *PluginConfig) Discover() error {
 
 const ForceGobEnvvar = "PACKER_FORCE_GOB"
 
+// PackerUseProto records the default feature version for plugin
+// communication: protobuf is on by default.
+//
+// Deprecated: protocol selection is owned by the per-caller ProtocolRollout
+// held in PluginConfig.Protocols. This variable is only kept for
+// compatibility with external importers and must not be mutated. A gob-only
+// caller now degrades to gob on its own without downgrading the other
+// callers, and PACKER_FORCE_GOB is honoured through the rollout.
 var PackerUseProto = true
+
+// StartPluginClient resolves the wire protocol feature version selected for
+// caller, freezes that decision on a new plugin client, and prepares the
+// command line for the plugin binary at path:
+//
+//	prefix [--protobuf] suffix
+//
+// --protobuf is only inserted when caller gets the protobuf feature version.
+// The returned client is not started yet, but its protocol decision is
+// immutable: later ProtocolRollout.Commit or Rollback changes only affect
+// clients created afterwards, never in-flight requests against this one.
+func (c *PluginConfig) StartPluginClient(caller, path string, prefix, suffix []string) *PluginClient {
+	useProto := c.protocolRollout().UseProtobuf(caller)
+
+	args := make([]string, 0, len(prefix)+len(suffix)+1)
+	args = append(args, prefix...)
+	if useProto {
+		args = append(args, "--protobuf")
+	}
+	args = append(args, suffix...)
+
+	client := c.Client(path, args...)
+	// Freeze the decision so the RPC client and the plugin subprocess args
+	// stay consistent for the whole lifetime of this client.
+	client.config.UseProto = useProto
+	return client
+}
 
 // DiscoverMultiPlugin takes the description from a multi-component plugin
 // binary and makes the plugins available to use in Packer. Each plugin found in the
@@ -138,17 +201,24 @@ func (c *PluginConfig) DiscoverMultiPlugin(pluginName, pluginPath string) error 
 		return fmt.Errorf("failed to get plugin description from executable %q: %s", pluginPath, err)
 	}
 
-	canProto := desc.ProtocolVersion == "v2"
-	if os.Getenv(ForceGobEnvvar) != "" && os.Getenv(ForceGobEnvvar) != "0" {
-		canProto = false
-	}
+	return c.registerMultiPlugin(pluginName, pluginPath, desc)
+}
 
-	// Keeps track of whether or not the plugin had components registered
-	//
-	// If no components are registered, we don't need to clamp usage of
-	// protobuf regardless if the plugin supports it or not, as we won't
-	// use it at all.
-	registered := false
+// registerMultiPlugin registers the components advertised in desc for the
+// plugin binary at pluginPath. It is split from DiscoverMultiPlugin so the
+// protocol rollout can be exercised with synthetic descriptions without
+// having to exec a plugin binary.
+func (c *PluginConfig) registerMultiPlugin(pluginName, pluginPath string, desc pluginsdk.SetDescription) error {
+	c.protocolRollout()
+
+	// Record the caller's capability and, for an old client that only
+	// supports gob, degrade only this caller to the stable gob response.
+	// Other callers are unaffected.
+	supported := protocolFromDescription(desc.ProtocolVersion)
+	c.Protocols.SetSupport(pluginName, supported)
+	if supported == WireProtocolGob {
+		log.Printf("[INFO] plugin %q does not support protobuf (reported protocol_version %q); using the stable gob wire protocol for this plugin", pluginName, desc.ProtocolVersion)
+	}
 
 	pluginPrefix := pluginName + "-"
 	pluginDetails := PluginDetails{
@@ -166,17 +236,10 @@ func (c *PluginConfig) DiscoverMultiPlugin(pluginName, pluginPath string) error 
 		if c.Builders.Has(key) {
 			continue
 		}
-		registered = true
 
 		c.Builders.Set(key, func() (packersdk.Builder, error) {
-			args := []string{"start", "builder"}
-
-			if PackerUseProto {
-				args = append(args, "--protobuf")
-			}
-			args = append(args, builderName)
-
-			return c.Client(pluginPath, args...).Builder()
+			return c.StartPluginClient(pluginName, pluginPath,
+				[]string{"start", "builder"}, []string{builderName}).Builder()
 		})
 		GlobalPluginsDetailsStore.SetBuilder(key, pluginDetails)
 	}
@@ -194,17 +257,10 @@ func (c *PluginConfig) DiscoverMultiPlugin(pluginName, pluginPath string) error 
 		if c.PostProcessors.Has(key) {
 			continue
 		}
-		registered = true
 
 		c.PostProcessors.Set(key, func() (packersdk.PostProcessor, error) {
-			args := []string{"start", "post-processor"}
-
-			if PackerUseProto {
-				args = append(args, "--protobuf")
-			}
-			args = append(args, postProcessorName)
-
-			return c.Client(pluginPath, args...).PostProcessor()
+			return c.StartPluginClient(pluginName, pluginPath,
+				[]string{"start", "post-processor"}, []string{postProcessorName}).PostProcessor()
 		})
 		GlobalPluginsDetailsStore.SetPostProcessor(key, pluginDetails)
 	}
@@ -222,17 +278,10 @@ func (c *PluginConfig) DiscoverMultiPlugin(pluginName, pluginPath string) error 
 		if c.Provisioners.Has(key) {
 			continue
 		}
-		registered = true
 
 		c.Provisioners.Set(key, func() (packersdk.Provisioner, error) {
-			args := []string{"start", "provisioner"}
-
-			if PackerUseProto {
-				args = append(args, "--protobuf")
-			}
-			args = append(args, provisionerName)
-
-			return c.Client(pluginPath, args...).Provisioner()
+			return c.StartPluginClient(pluginName, pluginPath,
+				[]string{"start", "provisioner"}, []string{provisionerName}).Provisioner()
 		})
 		GlobalPluginsDetailsStore.SetProvisioner(key, pluginDetails)
 
@@ -250,30 +299,15 @@ func (c *PluginConfig) DiscoverMultiPlugin(pluginName, pluginPath string) error 
 		if c.DataSources.Has(key) {
 			continue
 		}
-		registered = true
 
 		c.DataSources.Set(key, func() (packersdk.Datasource, error) {
-			args := []string{"start", "datasource"}
-
-			if PackerUseProto {
-				args = append(args, "--protobuf")
-			}
-			args = append(args, datasourceName)
-
-			return c.Client(pluginPath, args...).Datasource()
+			return c.StartPluginClient(pluginName, pluginPath,
+				[]string{"start", "datasource"}, []string{datasourceName}).Datasource()
 		})
 		GlobalPluginsDetailsStore.SetDataSource(key, pluginDetails)
 	}
 	if len(desc.Datasources) > 0 {
 		log.Printf("found external %v datasource from %s plugin", desc.Datasources, pluginName)
-	}
-
-	// Only print the log once, for the plugin that triggers that
-	// limitation in functionality. Otherwise this could be a bit
-	// verbose to print it for each non-compatible plugin.
-	if registered && !canProto && PackerUseProto {
-		log.Printf("plugin %q does not support Protobuf, forcing use of Gob", pluginPath)
-		PackerUseProto = false
 	}
 
 	return nil
